@@ -1,10 +1,12 @@
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.net.Socket;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -12,7 +14,9 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.Dictionary;
+import java.util.HashMap;
 import java.util.Hashtable;
+import java.util.Map;
 import java.util.TimeZone;
 
 public class HTTP1RequestHandler implements Runnable {
@@ -33,11 +37,14 @@ public class HTTP1RequestHandler implements Runnable {
         this.clientSocket = clientSocket;
         responseStatusCodes = new Hashtable<Integer, String>();
 		responseStatusCodes.put(200, "HTTP/1.0 200 OK");
+		responseStatusCodes.put(204, "HTTP/1.0 204 No Content");
 		responseStatusCodes.put(304, "HTTP/1.0 304 Not Modified");
 		responseStatusCodes.put(400, "HTTP/1.0 400 Bad Request");
 		responseStatusCodes.put(403, "HTTP/1.0 403 Forbidden");
 		responseStatusCodes.put(404, "HTTP/1.0 404 Not Found");
+		responseStatusCodes.put(405, "HTTP/1.0 405 Method Not Allowed");
 		responseStatusCodes.put(408, "HTTP/1.0 408 Request Timeout");
+		responseStatusCodes.put(411, "HTTP/1.0 411 Length Required");
 		responseStatusCodes.put(500, "HTTP/1.0 500 Internal Server Error");
 		responseStatusCodes.put(501, "HTTP/1.0 501 Not Implemented");
 		responseStatusCodes.put(503, "HTTP/1.0 503 Service Unavailable");
@@ -59,25 +66,25 @@ public class HTTP1RequestHandler implements Runnable {
 			// Find out the appropriate function based on request
             if (clientRequest != null) {
 	            switch(clientRequest.httpFunction) {
-		            case PartialHTTP1Server.HTTP_GET_FUNC:
+		            case HTTP1Server.HTTP_GET_FUNC:
 		            	handleGET(clientRequest);
 		            	break;
-		            case PartialHTTP1Server.HTTP_HEAD_FUNC:
+		            case HTTP1Server.HTTP_HEAD_FUNC:
 		            	handleHEAD(clientRequest);
 		            	break;
-		            case PartialHTTP1Server.HTTP_POST_FUNC:
-		            	handleGET(clientRequest);
+		            case HTTP1Server.HTTP_POST_FUNC:
+		            	handlePOST(clientRequest);
 		            	break;
-		            case PartialHTTP1Server.HTTP_PUT_FUNC:
+		            case HTTP1Server.HTTP_PUT_FUNC:
 		            	SendMsgToClient(responseStatusCodes.get(501));
 		            	break;
-		            case PartialHTTP1Server.HTTP_DELETE_FUNC:
+		            case HTTP1Server.HTTP_DELETE_FUNC:
 		            	SendMsgToClient(responseStatusCodes.get(501));
 		            	break;
-		            case PartialHTTP1Server.HTTP_LINK_FUNC:
+		            case HTTP1Server.HTTP_LINK_FUNC:
 		            	SendMsgToClient(responseStatusCodes.get(501));
 		            	break;
-		            case PartialHTTP1Server.HTTP_UNLINK_FUNC:
+		            case HTTP1Server.HTTP_UNLINK_FUNC:
 		            	SendMsgToClient(responseStatusCodes.get(501));
 		            	break;
 		            default:
@@ -174,7 +181,234 @@ public class HTTP1RequestHandler implements Runnable {
     		e.printStackTrace();
     	}
     }
-
+	
+	private void handlePOST(HTTP1Request clientRequest) {
+		if ( clientRequest == null ) return;
+		//System.out.println("va: " + !CheckResource(clientRequest.resourcePath));    	
+    	
+		ProcessBuilder pb = null;
+		Process process = null;
+		BufferedReader stdin = null;
+    	ArrayList<String> msg = clientRequest.msg;
+    	String [] query = null;
+    	String [] content_length = null;
+    	String [] content_type = null;
+    	String [] resPartition = null;
+    	String [] userAgent = null;
+    	String [] from = null;    	
+    	String finalQuery = "";
+    	String inMsg  = null;
+    	int contentLengthNum = 0;
+    	
+    	
+    	//System.out.println("client connected to port: " + clientSocket.getPort());
+    	
+    	boolean blankLine = false;
+    			
+    	//check for content-length and content-type
+    	//look for content-length header
+    	content_length = GetLineInRequest(msg, "Content-Length", " ", 2);
+    	//check if content_length is not null and contain exactly 
+    	//2 elements (ideally ["Content-Length:", "xx"]
+    	if ( content_length == null || content_length.length != 2 ) {
+    		SendMsgToClient(responseStatusCodes.get(411));
+    		return;
+    	}
+    	//check to see if the content length is a 
+    	//numeric value, if not, then send HTTP message
+    	//error 411
+    	try {
+    		//if the numerical value is the 0th element
+    		//than 411 will be send 
+    		contentLengthNum = Integer.parseInt(content_length[1]);
+    	}catch(Exception e) {
+    		SendMsgToClient(responseStatusCodes.get(411));
+    		return;
+    	}
+    	
+    	//look for content-type in header
+    	content_type = GetLineInRequest(msg, "Content-Type", " ", 2);
+    	//send an HTTP 500 error message if no content-type
+    	//header exist in request
+    	if ( content_type == null ) {
+    		SendMsgToClient(responseStatusCodes.get(500));
+    		return;
+    	}
+    	
+    	//determine if the resource file is a cgi
+    	resPartition = clientRequest.resourcePath.split("\\.");
+    	if ( resPartition == null || resPartition.length == 0 ) return;
+    	if ( !resPartition[resPartition.length - 1].equals("cgi") ) {
+    		SendMsgToClient(responseStatusCodes.get(405));
+    		return;
+    	}
+    	if ( !CheckResource(clientRequest.resourcePath)) return;
+    	if( !dir.canExecute() ) {
+    		SendMsgToClient(responseStatusCodes.get(403));
+    		return;
+    	}
+    	//get from header field if any
+    	from = GetLineInRequest(msg, "From:", " ", 2);
+    	
+    	//get User agent header field if any
+    	userAgent = GetLineInRequest(msg, "User-Agent:", " ", 2);
+    	
+    	//get query request
+    	for (int i = 0 ; i < msg.size() ; i ++) {
+    		System.out.println("line " + i + ": " + msg.get(i));
+    		//find the blank line so the next line is the query
+    		if(msg.get(i) != null && msg.get(i).equals("")) {
+    			blankLine = true;
+    			continue;
+    		}
+    		if ( blankLine ) {
+    			//separate the query by &
+    			query = msg.get(i).split("&");
+    			break;
+    		}
+    	}
+    	
+    	//decode only if we have a query
+    	if (query != null) {
+    		String tempt = "";
+	    	String [] tempt_arr = null;
+	    	char [] arr = HTTP1Server.HTTP_CGI_RESERVED_CHAR;
+	    	boolean toggle = false;
+	    	boolean t = false;
+	    	//loop through the query
+	    	for(int i = 0 ; i < query.length; i ++) {
+	    		//continue if ith query is null
+	    		if ( query[i] == null ) continue;
+	    		//split the ith query at '=' so we get
+	    		//[<NAME>,<VALUE>]
+	    		tempt_arr = query[i].split("=");
+	    		//continue if it could not have been done
+	    		if ( tempt_arr == null || tempt_arr.length != 2) continue;
+	    		//get the <value> of the ith query
+	    		//which should be the 2nd element
+	    		tempt = tempt_arr[1];
+	    		if( tempt == null ) continue;
+	    		//start decoding by finding the '!' symbol,
+	    		//and the char right after it must be a part
+	    		//of the reserved characters in arr
+	    		for(int c = 0 ; c < tempt.length(); c++) {
+	    			//the current character is '!' and 
+	    			//we have another character after it
+	    			//so we need to check if the character
+	    			//after it is in arr.
+	    			if(tempt.charAt(c) == '!' && !toggle && c < tempt.length() - 1) {
+	    				t = false;
+	    				//check if the next character is a reserved character
+	    				//if the current character is an escape character
+	    				for(int m = 0; m < arr.length; m++) {
+	    					if(tempt.charAt(c+1) == arr[m]) {
+	    						t = true;
+	    						break;
+	    					}
+	    				}
+	    				//if the next character is not a special character
+	    				//then continue
+	    				if (!t) continue;
+	    				//indicate that the current character is an 
+	    				//escape character, and the next character
+	    				//is a reserved character
+	    				toggle = true;
+	    				//cut out the escape character and decrement the
+	    				//c index variable
+	    				tempt = tempt.substring(0, c) + tempt.substring(c+1);
+	    				c--;
+	    				continue;
+	    			}
+	    			//check if either the current char is not an escape character
+	    			//or if it is that previous character was the actual escape character
+	    			//i.e. <Name> = !! <- and the 1st ! is the actual escape character.
+	    			//indicate to the next character, that the current character is not 
+	    			//an actual escape character.
+	    			if (tempt.charAt(c) != '!' || (tempt.charAt(c) == '!' && toggle)) {
+	    				toggle = false;
+	    			}
+	    		}
+	    		//queries.put(tempt_arr[0], tempt);
+	    		//reconstruct the ith query with the decoded version
+	    		query[i] = tempt_arr[0] + "=" + tempt;
+	    		//goto the next query in the query arr
+	    	}
+	    	
+	    	//reconstruct the final query message
+	    	for(int i = 0 ; i < query.length; i ++) {
+	    		if ( i < query.length - 1 ) finalQuery += query[i] + "&";
+	    		else finalQuery += query[i];
+	    	}
+    	}
+    	//turn final query into bytes
+    	byte[] finalQueryByte = finalQuery.getBytes();
+    	//Run the cgi
+    	try {
+    		String ret = "", content = "";
+    		OutputStream bw = null;
+    		pb = new ProcessBuilder(dir.getPath());
+    		Map<String, String> env = pb.environment();
+			//setup environment
+	    	env.put("CONTENT_LENGTH", contentLengthNum + "");
+	    	env.put("SCRIPT_NAME", clientRequest.resourcePath);
+	    	env.put("HTTP_FROM", ((from == null || from.length != 2) ? "" : from[1]));
+	    	env.put("HTTP_USER_AGENT", ((userAgent == null || userAgent.length != 2) ? "": userAgent[1]));
+	    	//start the process
+    		process = pb.start();
+			//write the param if any into the process
+    		bw = process.getOutputStream();
+    		bw.write(finalQueryByte);
+    		bw.flush();
+    		bw.close();
+    		
+			//get the output stream of what the cgi file return
+			stdin = new BufferedReader(new InputStreamReader(process.getInputStream()));
+			inMsg = null;
+			//collect the output from the file			
+			while((inMsg = stdin.readLine()) != null) {
+				content += inMsg + "\n";
+			}
+			//wait for the process to terminate
+			process.waitFor();
+			//System.out.println("\r\ncontent: " + content + "\n");
+			stdin.close();
+			process.destroy();
+			if ( content.length() == 0 ) {
+				SendMsgToClient(responseStatusCodes.get(204));
+			} else {
+				//set up return header
+				//initialize
+		    	Date d = null;
+		    	Date currDate = null;
+		    	Calendar calendar = null;
+		    	SimpleDateFormat sdf = null;
+		    	
+		    	//set the expire time to be 1 hour from access time
+		    	calendar = Calendar.getInstance();
+		    	calendar.add(Calendar.YEAR, 1);
+		    	//set time format
+		    	d = new Date(dir.lastModified());
+		    	currDate = calendar.getTime();
+		    	sdf = new SimpleDateFormat("E, dd MMM yyy HH:mm:ss z");
+		    	sdf.setTimeZone(TimeZone.getTimeZone("GMT"));
+				// craft header
+				ret = responseStatusCodes.get(200) + "\r\n";
+				ret = ret + "Allow: GET, POST, HEAD\r\n";
+				ret = ret + "Expires: " + sdf.format(currDate) + "\r\n";
+				ret = ret + "Content-Length: " + (content.length()) + "\r\n";
+				ret = ret + "Content-Type: text/html\r\n\r\n";
+				ret = ret + content;
+				
+				//send msg to client
+				SendMsgToClient(ret);
+			}			
+		} catch (IOException | InterruptedException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+    	
+    	
+	}
 	/**
 	 * Send message to client using byte representation of a file.
 	 * @param b  Byte representation of a file
@@ -182,6 +416,8 @@ public class HTTP1RequestHandler implements Runnable {
 	private void SendMsgToClient(byte[] b) {
     	if (clientSocket == null || b == null || outStream == null ) return;
 		try {
+			//System.out.println("message for port: " + clientSocket.getPort());
+			//System.out.println(b);
 			outStream.write(b);
 			outStream.flush();
 		} catch (IOException e) {
@@ -196,6 +432,8 @@ public class HTTP1RequestHandler implements Runnable {
 	private void SendMsgToClient (String msg) {
 		if (clientSocket == null || msg == null || outStream == null ) return;
 		try {
+			//System.out.println("message for port: " + clientSocket.getPort());
+			//System.out.println(msg);
 			outStream.write(msg.getBytes());
 			outStream.flush();
 		} catch (IOException e) {
@@ -214,20 +452,20 @@ public class HTTP1RequestHandler implements Runnable {
     	String ext = null;
     	if (partition == null || partition.length == 0) return null;
     	//if there is no extention, it is most likely octet-stream
-    	if ( partition.length == 1 ) return PartialHTTP1Server.MIME_APPLICATION_EXT + "octet-stream";
+    	if ( partition.length == 1 ) return HTTP1Server.MIME_APPLICATION_EXT + "octet-stream";
     	
     	//the extention should be the last entry
     	ext = partition[partition.length - 1];
     	
     	//find the correct extentions
     	if ( ext.equals("txt") || ext.equals("html") )
-    		return PartialHTTP1Server.MIME_TEXT_EXT + ext;
+    		return HTTP1Server.MIME_TEXT_EXT + ext;
     	else if ( ext.equals("gif") || ext.equals("jpeg") || ext.equals("png") )
-    		return PartialHTTP1Server.MIME_IMAGE_EXT + ext;
+    		return HTTP1Server.MIME_IMAGE_EXT + ext;
     	else if ( ext.equals("pdf") || ext.equals("x-gzip") || ext.equals("zip") )
-    		return PartialHTTP1Server.MIME_APPLICATION_EXT + ext;
+    		return HTTP1Server.MIME_APPLICATION_EXT + ext;
     	else 
-    		return PartialHTTP1Server.MIME_APPLICATION_EXT + "octet-stream";
+    		return HTTP1Server.MIME_APPLICATION_EXT + "octet-stream";
     }
 
 	/**
@@ -245,7 +483,7 @@ public class HTTP1RequestHandler implements Runnable {
     	SimpleDateFormat sdf = null;
     	String ret = null;
     	
-    	//set the expire time to be 1 hour from access time
+    	//set the expire time to be 1 year from access time
     	calendar = Calendar.getInstance();
     	calendar.add(Calendar.YEAR, 1);
     	//set time format
@@ -290,7 +528,17 @@ public class HTTP1RequestHandler implements Runnable {
     	}
     	return true;
     }
-
+	
+	private String [] GetLineInRequest(ArrayList<String> headers, String phrase, String splitPattern, int splitCount) {
+		if ( splitPattern == null || splitCount < 0 || headers == null || phrase == null ) return null;
+    	for(int i = 0; i < headers.size(); i ++) {
+    		if ( headers.get(i).contains(phrase)) {
+    			return headers.get(i).split(splitPattern, splitCount);
+    		}
+    	}
+    	return null;
+	}
+	
 	/**
 	 * Read in request form the client, parse it, and return an HTTP1Request Object.
 	 * @return HTTP1Request object representing the user's request
@@ -316,6 +564,7 @@ public class HTTP1RequestHandler implements Runnable {
     	ArrayList<String> headers = new ArrayList<String>();
     	String[] requestHeader = null;
     	String[] ifModHeader = null;
+    	String[] queryHeader = null;
     	
     	String[] versionParse = null;
     	//String clientRequest = "";	//remove before submission
@@ -357,21 +606,16 @@ public class HTTP1RequestHandler implements Runnable {
 
     	//find the request header, right now it is the first string in headers
     	requestHeader = headers.get(0).split(" ");
-    	
-    	//find If-Modified-Since header
-    	for(int i = 0; i < headers.size(); i ++) {
-    		if ( headers.get(i).contains("If-Modified-Since")) {
-    			ifModHeader = headers.get(i).split(" ", 2);
-    			break;
-    		}
-    	}
-    	
-        // client submitted less than 3 tokens, 
+
+        // client submitted less than 3 tokens
     	// in the request header send 400 error
         if (requestHeader.length < 3) {
         	SendMsgToClient(responseStatusCodes.get(400));
         	return null;
         }
+        
+    	//find If-Modified-Since header
+        ifModHeader = GetLineInRequest(headers, "If-Modified-Since", " ", 2);
         
         //HTTP version checker
         versionParse = requestHeader[2].split("/");
@@ -379,10 +623,11 @@ public class HTTP1RequestHandler implements Runnable {
         	SendMsgToClient(responseStatusCodes.get(400));
         	return null;
         }
+        
         //try to parse the version into a float value
         try{
         	vNum = Float.parseFloat(versionParse[1]);
-        	if (vNum > PartialHTTP1Server.HTTP_VERSION) {
+        	if (vNum > HTTP1Server.HTTP_VERSION) {
         		//version not supported 505 error
         		SendMsgToClient(responseStatusCodes.get(505));
         		return null;
@@ -418,24 +663,34 @@ public class HTTP1RequestHandler implements Runnable {
         }
         
         // Construct an HTTP1Request Object from the parsed tokens
-        requestObject = new HTTP1Request(requestHeader[0], requestHeader[1],
+        requestObject = new HTTP1Request(headers, requestHeader[0], requestHeader[1],
                 requestHeader[2], ifModSinceFlag , ifModSinceDay);
-
+        System.out.println(headers.toString());
         return requestObject;
     }
     
     // Inner Class used to represent an HTTP Request
     private static class HTTP1Request {
+    	//represent the msg that was received,
+    	//depending on the HTTP function selected, 
+    	//the request will require the original msg to process
+    	//what it needs. Rather than having separate variable for each 
+    	//headers.
+    	private ArrayList<String> msg;
         private String httpFunction;
         private String resourcePath;
         private String httpProtocol;
+        private String fromsrc;
+        private String userAgent;
+        private String queryExpression;
         private boolean ifModSince;
         private long ifModSinceDay;
         
-        public HTTP1Request(String httpFunction, String resourcePath, String httpProtocol, boolean ifModSince , long ifModSinceDay ) {
+        public HTTP1Request(ArrayList<String> msg, String httpFunction, String resourcePath, String httpProtocol, boolean ifModSince , long ifModSinceDay ) {
             this.httpFunction = httpFunction;
             this.resourcePath = resourcePath;
             this.httpProtocol = httpProtocol;
+            this.msg = msg;
             this.ifModSince = ifModSince;
             this.ifModSinceDay = ifModSinceDay;
         }
